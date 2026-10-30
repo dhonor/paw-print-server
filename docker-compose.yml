@@ -1,0 +1,23 @@
+services:
+  db:
+    # 国内直连 Docker Hub 常超时，默认走 DaoCloud 镜像源；
+    # 网络通畅时也可换回官方 postgres:16-alpine
+    image: docker.m.daocloud.io/library/postgres:16-alpine
+    container_name: paw-print-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: paw
+      POSTGRES_PASSWORD: paw123456
+      POSTGRES_DB: paw_print
+    ports:
+      - "5432:5432"
+    volumes:
+      - paw-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U paw -d paw_print"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+volumes:
+  paw-pgdata:

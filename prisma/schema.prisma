@@ -1,0 +1,125 @@
+// 爪印数据模型
+// 设计要点：所有业务数据都挂 familyId，服务端按家庭做行级隔离，
+// 这样"家庭共享"天然成立，不需要额外做权限表。
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model Family {
+  id        String   @id @default(cuid())
+  name      String   @default("我的家庭")
+  createdAt DateTime @default(now())
+
+  users     User[]
+  pets      Pet[]
+  records   Record[]
+  reminders Reminder[]
+  bookings  Booking[]
+}
+
+model User {
+  id        String   @id @default(cuid())
+  openid    String   @unique
+  nickname  String   @default("")
+  avatar    String   @default("")
+  role      String   @default("成员")
+  // 一次性订阅的可发送次数：用户每授权一次 +1，成功推一条 -1
+  subscribeCount Int @default(0)
+  familyId  String
+  family    Family   @relation(fields: [familyId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@index([familyId])
+}
+
+model Pet {
+  id               String   @id @default(cuid())
+  familyId         String
+  family           Family   @relation(fields: [familyId], references: [id], onDelete: Cascade)
+  name             String
+  species          String   @default("狗")
+  breed            String   @default("")
+  gender           String   @default("未知")
+  birthday         String   @default("")
+  avatar           String   @default("dog")
+  note             String   @default("")
+  microchip        String   @default("")
+  emergencyContact String   @default("")
+  sterilized       String   @default("未知")
+  noseprintCode    String?
+  noseprintAt      String?
+  noseprintQuality Float?
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  records   Record[]
+  reminders Reminder[]
+  bookings  Booking[]
+
+  @@index([familyId])
+}
+
+model Record {
+  id        String   @id @default(cuid())
+  familyId  String
+  family    Family   @relation(fields: [familyId], references: [id], onDelete: Cascade)
+  petId     String
+  pet       Pet      @relation(fields: [petId], references: [id], onDelete: Cascade)
+  type      String
+  date      String
+  value     String   @default("")
+  anomaly   String   @default("")
+  note      String   @default("")
+  operator  String   @default("")
+  createdAt DateTime @default(now())
+
+  @@index([familyId, petId])
+  @@index([familyId, date])
+}
+
+model Reminder {
+  id        String   @id @default(cuid())
+  familyId  String
+  family    Family   @relation(fields: [familyId], references: [id], onDelete: Cascade)
+  petId     String
+  pet       Pet      @relation(fields: [petId], references: [id], onDelete: Cascade)
+  type      String
+  cycleDays Int      @default(30)
+  nextDate  String
+  enabled   Boolean  @default(true)
+  note      String   @default("")
+  // 上次推送日期（YYYY-MM-DD），用于防止同一天重复推送
+  lastNotifiedDate String @default("")
+  createdAt DateTime @default(now())
+
+  @@index([familyId, nextDate])
+}
+
+model Booking {
+  id           String   @id @default(cuid())
+  familyId     String
+  family       Family   @relation(fields: [familyId], references: [id], onDelete: Cascade)
+  petId        String
+  pet          Pet      @relation(fields: [petId], references: [id], onDelete: Cascade)
+  placeName    String
+  placeAddress String   @default("")
+  placeTel     String   @default("")
+  serviceType  String
+  date         String
+  timeSlot     String
+  status       String   @default("待服务")
+  rating       Int      @default(0)
+  review       String   @default("")
+  note         String   @default("")
+  // 预约人（哪个家庭成员下的单），与记录保持一致的字段
+  operator     String   @default("")
+  createdAt    DateTime @default(now())
+
+  @@index([familyId, status])
+}
