@@ -123,3 +123,19 @@ model Booking {
 
   @@index([familyId, status])
 }
+
+// 意见反馈：用户提交的建议/问题，不建外键（账号可能后续注销，记录仍要留存）
+model Feedback {
+  id        String   @id @default(cuid())
+  familyId  String   @default("")
+  userId    String   @default("")
+  type      String   @default("功能建议")
+  content   String
+  contact   String   @default("")
+  // 图片地址，多个用逗号分隔
+  images    String   @default("")
+  status    String   @default("待处理")
+  createdAt DateTime @default(now())
+
+  @@index([createdAt])
+}

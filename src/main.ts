@@ -11,6 +11,20 @@ async function bootstrap() {
 
     app.setGlobalPrefix('api');
     app.enableCors();
+
+    // 简易请求日志：排查「小程序请求到底有没有打到后端」时最有用
+    app.use((req: any, res: any, next: () => void) => {
+        const start = Date.now();
+        res.on('finish', () => {
+            // eslint-disable-next-line no-console
+            console.log(
+                `[${new Date().toISOString().slice(11, 19)}] ${req.method} ${req.originalUrl} ` +
+                    `${res.statusCode} ${Date.now() - start}ms`,
+            );
+        });
+        next();
+    });
+
     // 统一错误结构：{ statusCode, message, path }，前端可以直接展示 message
     app.useGlobalFilters(new AllExceptionsFilter());
     // 上传的图片直接对外暴露：http://host/uploads/xxx.jpg

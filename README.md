@@ -9,6 +9,10 @@
 - Node 18+（本机实测 Node 22）
 - Docker（用于起本地 PostgreSQL）；也可以用已有的 Postgres 实例，改 `DATABASE_URL` 即可
 
+## 生产部署
+
+上线流程（服务器、HTTPS、备案、备份、检查清单）见 **[DEPLOY.md](./DEPLOY.md)**。
+
 ## 一键启动（推荐）
 
 ```powershell
@@ -67,6 +71,9 @@ src/
   pets/ records/ reminders/ bookings/ families/   业务模块（controller + service + dto）
   notify/            订阅消息推送 + 30 分钟到期扫描定时器
   upload/            图片上传（存本地 uploads/）
+  lbs/               腾讯位置服务代理（周边搜索 / 逆地址解析）
+  feedback/          用户反馈
+  lbs/               腾讯位置服务代理（周边搜索 / 逆地址解析，key 只留在服务端）
 prisma/schema.prisma 数据模型（唯一结构来源）
 uploads/             上传的图片（不进 git，需单独备份）
 ```
@@ -83,6 +90,8 @@ uploads/             上传的图片（不进 git，需单独备份）
 | `JWT_SECRET` / `JWT_EXPIRES_IN` | 签发 token 的密钥与有效期（默认 `30d`） |
 | `ALLOW_MOCK_LOGIN` | 默认 `true`，**线上必须设 `false`** |
 | `WX_SUBSCRIBE_TEMPLATE_ID` | 订阅消息模板 ID，留空则推送走 mock |
+| `LBS_KEY` | 腾讯位置服务 WebServiceAPI key，**只放服务端**；留空时 `/api/lbs/*` 返回 503 |
+| `LBS_KEY` | 腾讯位置服务 WebServiceAPI key，周边搜索代理用；留空则 `/api/lbs/*` 返回 503 |
 
 ## 接口
 
@@ -116,6 +125,12 @@ uploads/             上传的图片（不进 git，需单独备份）
 | PATCH | `/api/family/me` | 改自己的昵称/角色 |
 | POST | `/api/family/join` | 用邀请码加入家庭（返回新 token） |
 | POST | `/api/upload` | 上传图片（`multipart/form-data`，字段名 `file`）→ `{ url, path, size }` |
+| GET | `/api/lbs/search?keyword=&latitude=&longitude=&radius=&pageSize=` | 周边搜索（腾讯位置服务代理，按距离排序，`radius` 默认 5000 米，`pageSize` 上限 20） |
+| GET | `/api/lbs/geocode?latitude=&longitude=` | 逆地址解析（坐标 → 地址/周边信息） |
+| POST | `/api/feedback` | 提交反馈（`type`/`content`/`contact`/`images`）→ `{ id, createdAt }` |
+| GET | `/api/feedback/mine` | 我提交过的反馈（最近 20 条，含处理状态） |
+| GET | `/api/lbs/search?keyword=&latitude=&longitude=&radius=&pageSize=` | 周边搜索（代理腾讯位置服务，`radius` 默认 5000 米，`pageSize` 上限 20） |
+| GET | `/api/lbs/geocode?latitude=&longitude=` | 逆地址解析（坐标 → 可读地址） |
 
 除 `/api/health` 与 `/api/auth/login` 外，都要带 `Authorization: Bearer <token>`。
 
@@ -124,9 +139,11 @@ uploads/             上传的图片（不进 git，需单独备份）
 - 统一前缀 `/api`；`POST /api/upload` 只收图片，单文件上限 5MB。
 - 上传成功返回的 `url` 是按请求 Host 拼的绝对地址，图片静态目录是 **`/uploads/…`（不带 `/api`）**。
 - 全局 `ValidationPipe`：`whitelist: true`，DTO 里没声明的字段会被静默丢弃（新增字段记得同时改 DTO）。
-- 出错统一返回 Nest 默认结构：`{ statusCode, message, error }`；token 缺失是 `未登录`，过期是 `登录已过期，请重新进入小程序`。
-- `GET /api/records` 的 `take` 不传默认 100 条；`GET /api/reminders` 按 `nextDate` 升序返回。
+- 出错统一返回 `{ statusCode, message, path }`（`AllExceptionsFilter` 兜底）；token 缺失是 `未登录`，过期是 `登录已过期，请重新进入小程序`。
+- `GET /api/records` 的 `take` 不传默认 100 条、上限 200，按 `date desc` 排序；`GET /api/reminders` 按 `nextDate` 升序返回。
 - CORS 全开（`app.enableCors()`），仅靠 JWT 做鉴权；开放 4000 端口到公网时注意这一点。
+- 位置服务不要从小程序直连：`/api/lbs/*` 由服务端带 `LBS_KEY` 转发。key 一旦打进小程序包就等于公开，会被盗刷配额。
+- `/api/lbs/search` 与 `/api/lbs/geocode` 也走 `JwtAuthGuard`，防止被当成免费代理。
 
 ## 鉴权说明
 
@@ -143,6 +160,22 @@ uploads/             上传的图片（不进 git，需单独备份）
 - 家庭 id 就是邀请码：家人在「家庭共享」里输入邀请码即可加入同一家庭；
 - 加入后服务端会重新签发 token（token 里带 familyId），前端要替换本地 token；
 - 同一家庭的所有成员共享同一份宠物、记录、提醒、预约数据。
+
+## 位置服务（LBS）
+
+为什么不让小程序直连腾讯：`WebServiceAPI` 的 key 一旦打进小程序包就等于公开，所以统一由后端代理（`src/lbs/`），key 只存 `.env` 的 `LBS_KEY`，并且这两个接口都要求登录态。
+
+- `search`：`boundary=nearby(纬度,经度,半径,自动扩大)`，`orderby=_distance`，只看第 1 页；
+- `geocode`：`get_poi=0`，只要行政区/街道信息；
+- 响应**原样透传**腾讯的 `{ status, message, data }`，小程序侧自己映射字段；
+- 错误映射：经纬度非法 → 400 `缺少有效的经纬度`；未配 `LBS_KEY` → 503；腾讯返回非 0 或超时（8s）→ 502。
+
+## 用户反馈
+
+- 类型枚举：`功能建议`（默认）/ `问题反馈` / `内容错误` / `其他`；`content` 必填、5~500 字；`contact` ≤60 字；`images` 最多 3 张，**先调 `/api/upload` 拿地址再传数组**。
+- 图片在库里是逗号拼接的字符串（`images` 字段），不是关联表。
+- `status` 默认 `待处理`，目前没有后台处理接口，改状态只能直接在库里改（见 `DEPLOY.md`）。
+- `GET /api/feedback/mine` 只返回**当前登录用户**提交的记录，不带 `familyId` 维度。
 
 ## 订阅消息（到期提醒推送）
 

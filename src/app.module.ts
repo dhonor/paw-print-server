@@ -9,6 +9,8 @@ import { BookingsModule } from './bookings/bookings.module';
 import { FamiliesModule } from './families/families.module';
 import { NotifyModule } from './notify/notify.module';
 import { UploadModule } from './upload/upload.module';
+import { LbsModule } from './lbs/lbs.module';
+import { FeedbackModule } from './feedback/feedback.module';
 import { HealthController } from './health.controller';
 
 @Module({
@@ -23,6 +25,8 @@ import { HealthController } from './health.controller';
         FamiliesModule,
         NotifyModule,
         UploadModule,
+        LbsModule,
+        FeedbackModule,
     ],
     controllers: [HealthController],
 })

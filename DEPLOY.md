@@ -1,326 +1,251 @@
-# 爪印后端 · 启动 / 部署 / 数据查看手册
+# 生产部署指南
 
-> 技术栈：NestJS 10 + Prisma 5 + PostgreSQL 16
-> 默认端口：后端 `4000`，数据库 `5432`
-> 接口前缀：`/api`；上传的图片走 `/uploads/`（不带 `/api` 前缀）
-
-相关文件速查：
-
-| 文件 | 作用 |
-|---|---|
-| `start-dev.ps1` | 本地一键启动脚本（Docker 数据库 + 后端） |
-| `docker-compose.yml` | 本地 PostgreSQL 容器（`paw-print-db`） |
-| `.env.example` | 环境变量模板，复制为 `.env` 使用 |
-| `prisma/schema.prisma` | 数据模型（改结构只改这里） |
-| `dev.log` / `dev.err.log` | `-Background` 模式下的后端日志 |
+面向第一次把爪印后端部署到云服务器的场景。按顺序执行，每一步都有验证方法。
 
 ---
 
-## 一、本地开发
+## 0. 前置条件
 
-### 1. 前置条件
+| 项 | 说明 | 耗时 |
+|---|---|---|
+| 云服务器 | 2 核 4G 起步（Ubuntu 22.04），带宽 3M 以上 | 10 分钟 |
+| 域名 | 如 `api.example.com` | 10 分钟 |
+| **ICP 备案** | 国内服务器必须，**最长的一步** | **1–2 周** |
+| SSL 证书 | Let's Encrypt 免费，脚本自动签 | 5 分钟 |
 
-- Node 18+（实测 Node 22）
-- Docker Desktop（或已有 Postgres 实例）
-- 首次执行前从 `.env.example` 复制出 `.env`
-
-### 2. 一键启动（推荐）
-
-```powershell
-cd d:\main\paw-print-server
-.\start-dev.ps1                # 前台启动，Ctrl+C 停止
-.\start-dev.ps1 -Background    # 后台启动，日志写 dev.log / dev.err.log
-.\start-dev.ps1 -Stop          # 停掉本项目的 node 进程
-.\start-dev.ps1 -NoDocker      # 跳过 Docker，连已有/远程 Postgres
-```
-
-脚本执行的 6 步：环境检查 → 启动 Docker 与 `paw-print-db` 容器 → `prisma generate` + `prisma db push` → 检查 4000 端口 → `npm run dev` → 轮询 `/api/health`。
-**重复执行安全**：已在运行且健康检查通过时会直接返回。
-
-### 3. 手动启动
-
-```powershell
-cp .env.example .env        # 1. 环境变量
-docker compose up -d        # 2. 启动数据库
-npm install                 # 3. 依赖
-npm run db:generate         # 4. 生成 Prisma Client
-npm run db:push             # 5. 同步表结构
-npm run dev                 # 6. 启动（ts-node-dev 热重载）
-```
-
-自检：
-
-```powershell
-curl http://127.0.0.1:4000/api/health
-```
-
-### 4. 本地登录（免真实微信凭据）
-
-`.env` 里 `WX_SECRET` 留空时，登录走 mock：`openid = mock_<code>`。小程序端固定传同一个 `code`（例如 `dev-user`）即可稳定复用一个用户。**线上必须填真实 `WX_SECRET` 并把 `ALLOW_MOCK_LOGIN` 设为 `false`。**
-
-### 5. 本地常见问题
-
-- **改了 `schema.prisma` 字段变 `undefined`**：必须依次执行 `npx prisma generate` → `npx prisma db push` → 手动重启 `npm run dev`（`ts-node-dev` 只监听 `src/**`，不会因 Client 更新而重启）。
-- **端口被占但健康检查不通**：上次残留进程，执行 `.\start-dev.ps1 -Stop` 后重来。
-- **Docker 引擎没起来**：脚本会尝试拉起 Docker Desktop，最多等 2 分钟；仍失败就手动打开。
-- **镜像拉不动**：`docker-compose.yml` 默认走 `docker.m.daocloud.io` 镜像源。
+> ⚠️ 备案没下来之前，小程序正式版无法把域名加入 request 白名单。**先提交备案，其余工作并行做。**
 
 ---
 
-## 二、线上部署（Linux 云服务器）
-
-以下以 Ubuntu 22.04 + 宝塔/裸机通用流程为例，目录约定 `/var/www/paw-print-server`，域名 `api.example.com`。
-
-### 1. 服务器准备
+## 1. 服务器初始化
 
 ```bash
-# Node 20（NodeSource）
-curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash -
-sudo apt install -y nodejs git nginx
-sudo npm i -g pm2
+# 登录
+ssh root@你的服务器IP
+
+# 基础环境
+apt update && apt upgrade -y
+apt install -y curl git nginx
+
+# Node 20
+curl -fsSL https://deb.nodesource.com/setup_20.x | bash -
+apt install -y nodejs
+node -v    # 应为 v20.x
+
+# Docker（跑 PostgreSQL）
+curl -fsSL https://get.docker.com | bash
+docker -v
+
+# pm2（进程守护）
+npm i -g pm2
 ```
 
-### 2. 数据库
+---
 
-**方案 A：云数据库（推荐）** — 阿里云 RDS / 腾讯云 PostgreSQL，创建库 `paw_print`，记下连接串。
-
-**方案 B：服务器自带 Docker**
+## 2. 拉代码与配置
 
 ```bash
-sudo apt install -y docker.io docker-compose-plugin
-# 复用仓库里的 docker-compose.yml，但生产务必改掉默认密码
-docker compose up -d
-```
-
-无论哪种，最终都要落到 `DATABASE_URL`：
-
-```
-postgresql://paw:强密码@数据库内网地址:5432/paw_print?schema=public
-```
-
-### 3. 拉代码 + 安装 + 构建
-
-```bash
-sudo mkdir -p /var/www && cd /var/www
-git clone <仓库地址> paw-print-server
+mkdir -p /var/www && cd /var/www
+git clone 你的仓库地址 paw-print-server
 cd paw-print-server
 
-cp .env.example .env
-vim .env          # 见下方“生产 .env 必改项”
+# 生产环境变量
+cp .env.production.example .env
+chmod 600 .env
+nano .env      # 逐项填写，重点：DATABASE_URL / WX_SECRET / JWT_SECRET
+```
 
-npm ci
+**生成 JWT_SECRET**：
+
+```bash
+openssl rand -base64 32
+```
+
+**必改的三项**（不改等于裸奔）：
+
+| 变量 | 错误值 | 正确做法 |
+|---|---|---|
+| `JWT_SECRET` | `dev-secret` | 随机 32 字节 |
+| `ALLOW_MOCK_LOGIN` | `true` | `false` |
+| `DATABASE_URL` 密码 | `paw123456` | 强密码 |
+
+---
+
+## 3. 启动数据库
+
+```bash
+docker compose up -d
+docker compose ps        # 状态应为 healthy
+```
+
+> 云数据库（RDS）用户跳过这步，直接改 `DATABASE_URL` 指向 RDS。
+> **不要**把 5432 暴露到公网：`docker-compose.yml` 里的端口映射建议改成 `127.0.0.1:5432:5432`。
+
+---
+
+## 4. 建表与启动服务
+
+```bash
+npm install --production=false   # 需要 devDependencies 里的 prisma/tsc
 npx prisma generate
-npx prisma db push --skip-generate   # 首次建表；见下方“关于迁移”
-npm run build                        # 产出 dist/
-```
 
-**生产 `.env` 必改项：**
+# 首次建表（二选一）
+npx prisma db push               # 简单直接，适合首次
+# npx prisma migrate deploy      # 有 migrations 目录时更稳妥
 
-| 变量 | 生产值 |
-|---|---|
-| `PORT` | `4000`（或反代后的内部端口） |
-| `DATABASE_URL` | 真实库地址 + 强密码 |
-| `WX_SECRET` | 真实小程序 secret（小程序后台 → 开发管理 → 开发设置） |
-| `ALLOW_MOCK_LOGIN` | `false`（否则任何人都能伪造登录） |
-| `JWT_SECRET` | 换成长随机串，别用 `change-me-in-production` |
-| `WX_SUBSCRIBE_TEMPLATE_ID` | 订阅消息模板 ID（不填则推送走 mock） |
-
-### 4. 用 PM2 常驻
-
-```bash
-pm2 start dist/main.js --name paw-print-api
+npm run build
+pm2 start ecosystem.config.js
 pm2 save
-pm2 startup            # 按提示执行输出的那行命令，实现开机自启
-pm2 logs paw-print-api # 看日志
-pm2 restart paw-print-api
+pm2 startup                      # 按提示执行输出的命令，实现开机自启
+
+# 验证
+curl http://127.0.0.1:4000/api/health
+# {"ok":true,"ts":...}
 ```
 
-> 注意：`npm run start` 等价于 `node dist/main.js`，PM2 不跑 `npm run dev`。
-
-### 5. Nginx 反代 + HTTPS
-
-```nginx
-server {
-    listen 80;
-    server_name api.example.com;
-    client_max_body_size 6m;      # 上传限制后端是 5MB，这里略放宽
-
-    location / {
-        proxy_pass http://127.0.0.1:4000;
-        proxy_http_version 1.1;
-        proxy_set_header Host $host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_set_header X-Forwarded-Proto $scheme;
-        proxy_read_timeout 60s;
-    }
-}
-```
+**目录权限**：图片存在 `uploads/`，确保运行用户有写权限：
 
 ```bash
-sudo ln -s /etc/nginx/sites-available/paw-print-api /etc/nginx/sites-enabled/
-sudo nginx -t && sudo systemctl reload nginx
-sudo apt install -y certbot python3-certbot-nginx
-sudo certbot --nginx -d api.example.com     # 自动签发并配置 443
+mkdir -p uploads logs && chmod 755 uploads logs
 ```
 
-**上传目录**：`uploads/` 在 `process.cwd()` 下，即 `/var/www/paw-print-server/uploads`。备份/迁移时要一起带走；生产建议改对象存储（COS/OSS）。
+---
 
-### 6. 小程序端联调前提
+## 5. Nginx 反向代理
 
-1. 微信小程序后台 → 开发管理 → 服务器域名，把 `https://api.example.com` 加到 **request 合法域名** 和 **uploadFile 合法域名**；
-2. 小程序端把 API 基址改成线上地址（不再是 `127.0.0.1:4000`）；
-3. 图片回显地址来自 `POST /api/upload` 返回的 `url`（用请求 Host 拼的），经反代后即为线上域名。
+```bash
+cp deploy/nginx.conf.example /etc/nginx/sites-available/paw-print
+nano /etc/nginx/sites-available/paw-print   # 改 server_name 为你的域名
+ln -s /etc/nginx/sites-available/paw-print /etc/nginx/sites-enabled/
+nginx -t && systemctl reload nginx
+```
 
-### 7. 发布/更新流程
+**签 HTTPS 证书**：
+
+```bash
+apt install -y certbot python3-certbot-nginx
+certbot --nginx -d api.example.com
+# 按提示填邮箱，选择「将 HTTP 重定向到 HTTPS」
+
+# 自动续期测试
+certbot renew --dry-run
+```
+
+**验证**：
+
+```bash
+curl https://api.example.com/api/health
+```
+
+---
+
+## 6. 云服务器安全组
+
+只开这三个端口，**不要开 4000**：
+
+| 端口 | 用途 |
+|---|---|
+| 22 | SSH |
+| 80 | HTTP（跳转 HTTPS） |
+| 443 | HTTPS |
+
+4000 只监听本机，由 Nginx 转发。
+
+---
+
+## 7. 数据备份
+
+```bash
+mkdir -p /var/backups/paw
+cat > /usr/local/bin/paw-backup.sh <<'EOF'
+#!/bin/bash
+DATE=$(date +%F)
+docker exec paw-print-db pg_dump -U paw paw_print | gzip > /var/backups/paw/db_$DATE.sql.gz
+# 只保留最近 14 天
+find /var/backups/paw -name "db_*.sql.gz" -mtime +14 -delete
+EOF
+chmod +x /usr/local/bin/paw-backup.sh
+
+# 每天凌晨 3 点备份
+echo "0 3 * * * /usr/local/bin/paw-backup.sh" | crontab -
+```
+
+**恢复**：
+
+```bash
+gunzip -c /var/backups/paw/db_2026-11-09.sql.gz | docker exec -i paw-print-db psql -U paw -d paw_print
+```
+
+---
+
+## 8. 小程序端配置
+
+改 `paw-print/utils/config.js`：
+
+```js
+const RELEASE_API_BASE = 'https://api.example.com/api';
+```
+
+`devLoginCode` 已是 `isRelease ? '' : 'dev-user'`，正式版会自动走真实 `wx.login`，无需改动。
+
+**小程序后台**要做的三件事：
+
+1. 开发管理 → 开发设置 → **服务器域名** → request 合法域名填 `https://api.example.com`；
+2. 开发管理 → 接口设置 → 申请 **位置接口**（`wx.getLocation`），说明用途「展示附近宠物医院」；
+3. 设置 → 服务内容声明 → **用户隐私保护指引**，勾选：位置信息、相册（含相机）、微信昵称头像。
+
+---
+
+## 9. 上线检查清单
+
+上线前逐项打勾：
+
+- [ ] `curl https://域名/api/health` 返回 `{"ok":true}`
+- [ ] `.env` 里 `ALLOW_MOCK_LOGIN=false`、`JWT_SECRET` 已更换
+- [ ] 数据库端口未暴露公网
+- [ ] HTTPS 证书有效期正常（`certbot renew --dry-run`）
+- [ ] 备份脚本已跑过一次，`/var/backups/paw` 有文件
+- [ ] 小程序 request 白名单已配置
+- [ ] 隐私保护指引已提交并通过
+- [ ] `config.js` 的 `RELEASE_API_BASE` 已换真实域名
+- [ ] 体验版走一遍：登录 → 建宠物 → 记录 → 提醒 → 上传头像
+
+---
+
+## 10. 日常更新
 
 ```bash
 cd /var/www/paw-print-server
 git pull
-npm ci
+npm install
 npx prisma generate
-npx prisma db push --skip-generate   # 有结构变更时
+npx prisma db push        # 仅在 schema 变更时
 npm run build
-pm2 restart paw-print-api
-curl -s https://api.example.com/api/health
+pm2 reload paw-print-server
 ```
 
-### 8. 关于数据库迁移
-
-仓库当前**没有 `prisma/migrations` 目录**，所以生产直接 `npx prisma db push`（结构以 `schema.prisma` 为准）。
-
-想规范化版本管理，先在做完结构变更时执行一次：
-
-```bash
-npx prisma migrate dev --name init     # 生成 prisma/migrations，提交进仓库
-```
-
-之后生产改用：
-
-```bash
-npx prisma migrate deploy
-```
-
-⚠️ `migrate deploy` 本身**不会**执行 `generate`，且 `db push` 和 `migrate` 不要混用。
+**改了 `.env` 一定要 `pm2 reload`**，否则进程里还是旧变量。
 
 ---
 
-## 三、查看后台数据
+## 11. 常见问题
 
-### 1. Prisma Studio（图形化，最常用）
+| 现象 | 原因 | 处理 |
+|---|---|---|
+| `502 Bad Gateway` | 后端没起或端口不对 | `pm2 status`、`pm2 logs` |
+| 小程序报 `url not in domain list` | 域名没加白名单 / 证书无效 | 检查后台配置、`curl -I https://域名` |
+| 请求很慢 | 服务器带宽小 / 数据库没索引 | 看 `pm2 logs` 里的响应耗时 |
+| 图片 404 | `uploads/` 权限或路径问题 | 确认 `process.cwd()` 是项目根，目录可写 |
+| 时间差 8 小时 | 服务器时区 | `timedatectl set-timezone Asia/Shanghai` |
+| `Prisma Client did not initialize` | 忘了 `prisma generate` | 重新执行并 `pm2 restart` |
 
-**本地：**
+---
 
-```powershell
-npm run db:studio        # 打开 http://localhost:5555，数据在左侧边栏切换表
-```
+## 12. 后续建议
 
-**线上（推荐用 SSH 隧道，不要直接暴露 5555 端口）：**
-
-```bash
-# 服务器上启动，只监听本地回环
-cd /var/www/paw-print-server
-npx prisma studio --port 5555 --browser none
-# 本机另开一个终端建立隧道
-ssh -L 5555:127.0.0.1:5555 user@服务器IP
-# 然后本机浏览器访问 http://localhost:5555
-```
-
-（若用 PM2 常驻：`pm2 start "npx prisma studio --port 5555 --browser none" --name paw-studio`，用完记得 `pm2 delete paw-studio`。）
-
-表对应关系：`Family` 家庭 / `User` 用户 / `Pet` 宠物 / `Record` 记录 / `Reminder` 提醒 / `Booking` 预约。
-
-常用字段含义：
-
-- `User.subscribeCount`：剩余可推送次数（一次性订阅，授权 +1、发送 -1）；
-- `Reminder.nextDate` / `lastNotifiedDate`：下次到期日 / 上次推送日（防当天重复推送）；
-- `Booking.status`：`待服务` / `已完成` / `已取消`；`rating` 为 0 表示未评价；
-- `Pet.noseprintCode` 等：鼻纹识别结果，可为空。
-
-### 2. 命令行 SQL
-
-本地 Docker 容器：
-
-```bash
-docker exec -it paw-print-db psql -U paw -d paw_print
-```
-
-线上直连（RDS 或同机 Postgres）：
-
-```bash
-psql "postgresql://paw:密码@主机:5432/paw_print" 
-```
-
-进入后常用命令：
-
-```sql
-\dt                                     -- 列表
-\d "Pet"                                -- 表结构
-SELECT id, name, "familyId" FROM "Pet" ORDER BY "createdAt" DESC LIMIT 20;
-SELECT count(*) FROM "User";
-SELECT * FROM "Reminder" WHERE "nextDate" <= to_char(now(),'YYYY-MM-DD') AND enabled;
-SELECT status, count(*) FROM "Booking" GROUP BY status;
-\d+ "Record"
-```
-
-> Prisma 建的表名和列名是**双引号驼峰**，SQL 里必须加引号。
-
-### 3. 走接口看数据（无需 DB 权限）
-
-先换 token：
-
-```bash
-curl -X POST https://api.example.com/api/auth/login \
-  -H "Content-Type: application/json" -d '{"code":"dev-user"}'
-```
-
-再带 token 查询：
-
-```bash
-curl https://api.example.com/api/pets -H "Authorization: Bearer <token>"
-curl "https://api.example.com/api/records?petId=<id>&take=20" -H "Authorization: Bearer <token>"
-curl https://api.example.com/api/family -H "Authorization: Bearer <token>"
-```
-
-线上 `ALLOW_MOCK_LOGIN=false` 时必须有真实微信 `code`，`dev-user` 不再可用。
-
-### 4. 订阅推送调试
-
-```bash
-# 手动触发一次到期扫描，返回里含发送/跳过/mock 统计
-curl -X POST https://api.example.com/api/notify/run -H "Authorization: Bearer <token>"
-```
-
-定时扫描由进程内 `ReminderCronService` 负责：启动 15 秒后补跑一次，之后每 30 分钟一次。**多实例部署时每个实例都会扫**，需要改成单实例或加分布式锁。
-
-### 5. 看日志
-
-| 场景 | 命令 |
+| 项 | 说明 |
 |---|---|
-| 本地后台启动 | `Get-Content dev.log -Tail 50 -Wait`（错误看 `dev.err.log`） |
-| 本地前台启动 | 直接看终端输出 |
-| 线上 PM2 | `pm2 logs paw-print-api --lines 100` |
-| 线上 Docker 数据库 | `docker logs paw-print-db` |
-
----
-
-## 四、备份与恢复
-
-```bash
-# 备份（服务器上）
-pg_dump "postgresql://paw:密码@主机:5432/paw_print" -Fc -f paw_print_$(date +%F).dump
-# 恢复
-pg_restore -d "postgresql://paw:密码@主机:5432/paw_print" --clean paw_print_2026-10-30.dump
-# 上传文件
-tar czf uploads_$(date +%F).tar.gz /var/www/paw-print-server/uploads
-```
-
-## 五、上线前检查清单
-
-- [ ] `ALLOW_MOCK_LOGIN=false`、`JWT_SECRET` 已换
-- [ ] `WX_SECRET` 已填，`WX_SUBSCRIBE_TEMPLATE_ID` 已填
-- [ ] 数据库密码非默认值，且不对外开放 5432（只走内网/安全组）
-- [ ] 域名已加 HTTPS，并在小程序后台配置 request/uploadFile 合法域名
-- [ ] `pm2 save` + `pm2 startup` 已执行，重启服务器后服务能自恢复
-- [ ] `uploads/` 已纳入备份策略
-- [ ] `curl https://你的域名/api/health` 返回 200
+| 图片换对象存储 | 本地磁盘在多实例或迁移时会丢，接 COS/OSS 更稳 |
+| 内容安全审核 | 用户上传图片需过 `security.imgSecCheck`，这是审核必查项 |
+| 监控告警 | 至少给 `/api/health` 配一个定时探测，挂了能收到通知 |
+| 日志轮转 | pm2-logrotate，避免日志把磁盘写满 |
