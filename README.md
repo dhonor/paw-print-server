@@ -212,3 +212,9 @@ npx prisma db push    # 同步数据库结构
 - **定时推送重复发**：扫描器在进程内（启动 15 秒后补一次 + 每 30 分钟一次），部署多个实例会各自扫一遍，需要削成单实例或加锁。
 - **线上还看到 mock 登录**：`WX_SECRET` 为空或 `ALLOW_MOCK_LOGIN` 没设成 `false`。
 - **想看库里数据**：`npm run db:studio`；线上的安全做法见 `DEPLOY.md` 的「查看后台数据」。
+
+---
+
+## License
+
+[MIT](./LICENSE) © 2026 dhonor
